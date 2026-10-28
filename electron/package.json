@@ -1,0 +1,85 @@
+{
+  "name": "gencpu-seedance-studio",
+  "productName": "GenCPU Seedance Studio",
+  "version": "2.5.0",
+  "description": "GenCPU.com & GenPixo.com — Seedance AI Video Studio & Auto Delogo",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis portable",
+    "build:setup": "electron-builder --win nsis",
+    "build:portable": "electron-builder --win portable"
+  },
+  "author": "Duong Tho (gencpu.com | genpixo.com)",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "29.4.6",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.gencpu.seedancestudio",
+    "productName": "GenCPU Seedance Studio",
+    "electronVersion": "29.4.6",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "splash.html",
+      "icon.ico",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../server_ui.js",
+        "to": "app-backend/server_ui.js"
+      },
+      {
+        "from": "../github_update_config.json",
+        "to": "app-backend/github_update_config.json"
+      },
+      {
+        "from": "../tao_video_cookie_sll.js",
+        "to": "app-backend/tao_video_cookie_sll.js"
+      },
+      {
+        "from": "../xoa_logo_sll.js",
+        "to": "app-backend/xoa_logo_sll.js"
+      },
+      {
+        "from": "../bin/ffmpeg.exe",
+        "to": "app-backend/bin/ffmpeg.exe"
+      }
+    ],
+    "win": {
+      "icon": "icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GenCPU Seedance Studio",
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico",
+      "runAfterFinish": true,
+      "artifactName": "GenCPU_Seedance_Studio_Setup.exe"
+    },
+    "portable": {
+      "artifactName": "GenCPU_Seedance_Studio_Portable.exe"
+    }
+  }
+}

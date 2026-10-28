@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>GenCPU.com × GenPixo.com — Seedance Studio</title>
+<style>
+  body {
+    margin: 0;
+    height: 100vh;
+    background: #0b0c10;
+    color: #f1f5f9;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+  .logo-box {
+    width: 72px;
+    height: 72px;
+    border-radius: 18px;
+    background: #141722;
+    border: 2px solid #d4b475;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 35px rgba(212, 180, 117, 0.25);
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 800;
+    color: #e6c88a;
+    margin: 0 0 6px 0;
+  }
+  p {
+    font-size: 13px;
+    color: #8b93a7;
+    margin: 0 0 20px 0;
+  }
+  .loader {
+    width: 180px;
+    height: 4px;
+    background: #1e2230;
+    border-radius: 99px;
+    overflow: hidden;
+  }
+  .bar {
+    width: 45%;
+    height: 100%;
+    background: linear-gradient(90deg, #c6a664, #f0d799);
+    border-radius: 99px;
+    animation: slide 1.1s infinite ease-in-out;
+  }
+  @keyframes slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(240%); }
+  }
+</style>
+</head>
+<body>
+  <div class="logo-box">
+    <svg width="38" height="38" viewBox="0 0 24 24" fill="none">
+      <rect x="3" y="3" width="18" height="18" rx="4" stroke="#d4b475" stroke-width="2"/>
+      <polygon points="10,8 10,16 16,12" fill="#d4b475"/>
+    </svg>
+  </div>
+  <h1>GenCPU.com × GenPixo.com</h1>
+  <p>Đang khởi động Seedance AI Video Studio & Auto Delogo...</p>
+  <div class="loader"><div class="bar"></div></div>
+</body>
+</html>

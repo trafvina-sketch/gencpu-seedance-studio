@@ -1,0 +1,17 @@
+# Không đẩy các file nặng / dữ liệu cá nhân của máy lên GitHub
+bin/
+cookies/
+input_co_logo/
+output_goc/
+output_khong_logo/
+uploads_ref/
+electron/node_modules/
+electron/dist/
+node_modules/
+dist/
+*.mp4
+*.exe
+*.zip
+*.7z
+cookies.txt
+.github_token.json

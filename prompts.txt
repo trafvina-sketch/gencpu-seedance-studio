@@ -1,0 +1,13 @@
+# ====================================================================
+# DANH SÁCH PROMPT TẠO VIDEO SEEDANCE 1.5 (MAX 12 GIÂY - 720P - 3 LUỒNG)
+# ====================================================================
+# Hướng dẫn:
+# - Mỗi dòng là 1 video (các dòng bắt đầu bằng dấu # sẽ được bỏ qua).
+# - Cách 1 (Text-to-Video) : Chỉ cần viết câu prompt trên 1 dòng.
+# - Cách 2 (Image-to-Video): Ghi đường dẫn ảnh trước dấu "|" rồi đến prompt:
+#   Ví dụ: anh_nhan_vat.jpg | Nhân vật mỉm cười nhẹ nhàng bước đi trong nắng sớm
+# ====================================================================
+
+A cinematic tracking shot of a samurai walking through a neon-lit cyberpunk Tokyo alley in heavy rain, reflections on wet asphalt, 4k photorealistic.
+Aerial drone shot flying over a majestic waterfall in a lush tropical jungle at golden hour, mist rising, flocks of birds flying across the sun.
+Close-up cinematic portrait of an astronaut looking out the spacecraft window at a glowing blue nebula, subtle camera push-in.
