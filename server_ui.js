@@ -1451,6 +1451,14 @@ const HTML_UI = `<!DOCTYPE html>
         <span>1. Thêm Cookie (Mỗi hàng 1 Acc)</span>
         <span id="cookieDetectBadge" style="font-size:11px;color:var(--muted);font-weight:500;">Tự nhận diện</span>
       </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+        <a class="btn" href="https://ai.byteplus.com/ark/region:ap-southeast-1/experience/gen_video?model=seedance-1-5-pro-251215" target="_blank" style="font-size:11.5px;padding:6px 8px;border-color:rgba(212,180,117,0.4);color:var(--gold-light);" title="Mở trang đăng ký BytePlus nhận 2,000,000 Token miễn phí">
+          🎁 Đăng Ký Acc (2M Token)
+        </a>
+        <a class="btn" href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc?hl=en-US&utm_source=ext_sidebar" target="_blank" style="font-size:11.5px;padding:6px 8px;" title="Tải tiện ích Chrome Get cookies.txt LOCALLY để xuất Cookie">
+          🧩 Tải Extension Lấy Cookie
+        </a>
+      </div>
       <textarea id="cookieInput" rows="4" oninput="previewCookieCount()" placeholder="Dán mỗi Cookie 1 hàng (hoặc khối Netscape / JSON) vào đây..."></textarea>
       <div style="display:flex;gap:6px;margin-top:8px;">
         <button class="btn btn-gold" id="addCookieBtn" style="flex:1;" onclick="addCookie()">＋ Thêm & Check Token</button>
