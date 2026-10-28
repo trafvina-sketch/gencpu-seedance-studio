@@ -692,7 +692,9 @@ async function startBatchGeneration(options, rawPrompts) {
 
     (async () => {
         try {
-            const usableAccounts = [];
+            const estTokensPerVid = estimateVideoTokens(options);
+            const accStates = [];
+
             for (const acc of accounts) {
                 try {
                     const prevQ = acc.quotas?.[modelSpec.modelName];
@@ -708,171 +710,229 @@ async function startBatchGeneration(options, rawPrompts) {
                         }
                     }
                     acc.quotas = serverQuotas;
-                    const q = acc.quotas[modelSpec.modelName] || prevQ;
-                    if (q && q.remaining <= 0) continue;
-                    usableAccounts.push(acc);
-                } catch (_) {}
+                    if (!acc.quotas[modelSpec.modelName]) {
+                        acc.quotas[modelSpec.modelName] = prevQ || { total: 2000000, consumed: 0, remaining: 2000000 };
+                    }
+                    const qModel = acc.quotas[modelSpec.modelName];
+                    if (qModel.remaining < estTokensPerVid) {
+                        addLog(`⚠️ Bỏ qua Acc ${acc.name}: Còn ${qModel.remaining.toLocaleString()} token (Không đủ ${estTokensPerVid.toLocaleString()} token cho 1 video)`, 'warn');
+                        continue;
+                    }
+                    accStates.push({
+                        acc,
+                        qModel,
+                        inFlightReservedTokens: 0,
+                        activeWorkers: 0,
+                        exhausted: false,
+                        notifiedInsufficient: false
+                    });
+                } catch (err) {
+                    addLog(`⚠️ Bỏ qua Acc ${acc.name}: Lỗi kiểm tra Cookie (${err.message})`, 'warn');
+                }
             }
             saveAccounts(accounts);
 
-            if (usableAccounts.length === 0) {
-                const msg = `Tất cả Cookie đã hết 2,000,000 token ở model ${modelSpec.modelName}! Hãy thêm Cookie mới hoặc đổi sang model 1.0 Pro / Fast.`;
+            if (accStates.length === 0) {
+                const msg = `Không có Cookie nào đủ ${estTokensPerVid.toLocaleString()} token ở model ${modelSpec.modelName}! Hãy thêm Cookie mới, hạ thời lượng/độ phân giải, hoặc đổi sang model 1.0 Pro / Fast.`;
                 addLog(`⛔ ${msg}`, 'error');
                 for (const j of newJobs) {
                     if (j.status === 'waiting') {
                         j.status = 'error';
-                        j.statusText = 'Hết Token (Hãy thêm Cookie mới)';
+                        j.statusText = `Không đủ Token (Cần ${estTokensPerVid.toLocaleString()} token/video)`;
                     }
                 }
                 RUN_STATE.isRunning = false;
                 return;
             }
 
-            let queueIdx = 0;
+            // BỘ ĐIỀU PHỐI ĐA TÀI KHOẢN & ĐA LUỒNG TỰ ĐỘNG CHUYỂN PROMPT KHI HẾT/THIẾU TOKEN
+            const activePromises = new Set();
 
-            for (const acc of usableAccounts) {
-                if (queueIdx >= newJobs.length || RUN_STATE.stopRequested) break;
-                if (!acc.quotas) acc.quotas = {};
-                if (!acc.quotas[modelSpec.modelName]) {
-                    acc.quotas[modelSpec.modelName] = { total: 2000000, consumed: 0, remaining: 2000000 };
-                }
-                const qModel = acc.quotas[modelSpec.modelName];
-                if (qModel.remaining <= 0) continue;
+            async function executeJobOnAccount(accState, job, workerSlot) {
+                const { acc, qModel } = accState;
+                const estTokens = estimateVideoTokens(options);
 
-                let accountExhausted = false;
-                let inFlightReservedTokens = 0;
+                job.workerId = workerSlot;
+                job.accountId = acc.name || acc.accountId;
+                job.status = 'submitting';
+                job.statusText = `${acc.name} (Luồng ${workerSlot}): Đang gửi lệnh...`;
 
-                async function worker(workerId) {
-                    let workerState = null;
-                    try {
-                        workerState = await createWorkerSession(acc.cookies, modelSpec.modelId);
-                    } catch (err) {
-                        addLog(`❌ [Luồng ${workerId}] Lỗi phiên: ${err.message}`, 'error');
+                try {
+                    const workerState = await createWorkerSession(acc.cookies, modelSpec.modelId);
+                    const { messageItemId, taskId } = await submitVideoTask(acc.cookies, workerState, job, options, modelSpec);
+                    job.taskId = taskId;
+                    job.status = 'rendering';
+                    job.statusText = `${acc.name} (Luồng ${workerSlot}): Đang tạo video...`;
+
+                    const startPoll = Date.now();
+                    let downloadUrl = null;
+                    while (!RUN_STATE.stopRequested) {
+                        await new Promise(r => setTimeout(r, 4000));
+                        const pollRes = await fetch(`${BFF_BASE}/api/2024-10-01/GetMessageItem`, {
+                            method: 'POST',
+                            headers: buildHeaders(acc.cookies, true),
+                            body: JSON.stringify({ MessageItemId: messageItemId, ProjectName: 'default' })
+                        });
+                        const pollData = await pollRes.json();
+                        const result = pollData?.Result;
+                        if (!result) continue;
+
+                        const st = (result.Status || '').toLowerCase();
+                        job.elapsedSec = Math.round((Date.now() - startPoll) / 1000);
+                        job.statusText = `${acc.name} (Luồng ${workerSlot}): Đang render (${job.elapsedSec}s)...`;
+
+                        if (st === 'success' || st === 'succeeded') {
+                            const contentObj = JSON.parse(result.Content || '{}');
+                            downloadUrl = contentObj.downloadUrl || contentObj.url;
+                            break;
+                        } else if (st === 'failed' || st === 'error' || st === 'cancelled') {
+                            const errMsg = result.ErrorMessage || result.StatusMessage || 'Render lỗi trên server';
+                            throw new Error(errMsg);
+                        }
+                    }
+
+                    if (RUN_STATE.stopRequested) {
+                        accState.inFlightReservedTokens = Math.max(0, accState.inFlightReservedTokens - estTokens);
+                        job.status = 'error';
+                        job.statusText = 'Đã dừng';
                         return;
                     }
 
-                    while (queueIdx < newJobs.length && !accountExhausted && !RUN_STATE.stopRequested) {
-                        const availableToClaim = qModel.remaining - inFlightReservedTokens;
-                        if (qModel.remaining <= 0 || (availableToClaim <= 0 && inFlightReservedTokens > 0)) {
+                    job.status = 'cleaning';
+                    job.statusText = `${acc.name} (Luồng ${workerSlot}): Đang xoá logo...`;
+
+                    const fileName = `video_${String(job.id).padStart(3, '0')}_${taskId}.mp4`;
+                    const rawPath = path.join(DIRS.rawOut, fileName);
+                    const cleanPath = path.join(DIRS.cleanOut, fileName);
+
+                    const dlRes = await fetch(downloadUrl);
+                    if (!dlRes.ok) throw new Error(`Lỗi tải MP4`);
+                    fs.writeFileSync(rawPath, Buffer.from(await dlRes.arrayBuffer()));
+
+                    const delogoInfo = await removeLogoFFmpeg(rawPath, cleanPath, true);
+
+                    accState.inFlightReservedTokens = Math.max(0, accState.inFlightReservedTokens - estTokens);
+                    const actualTokens = estimateVideoTokens(options, delogoInfo.dims);
+                    qModel.consumed = Math.min(qModel.total, (qModel.consumed || 0) + actualTokens);
+                    qModel.remaining = Math.max(0, qModel.total - qModel.consumed);
+
+                    try {
+                        const remoteQ = await fetchAccountQuota(acc.cookies);
+                        const rq = remoteQ?.[modelSpec.modelName];
+                        if (rq) {
+                            qModel.consumed = Math.max(qModel.consumed, rq.consumed);
+                            qModel.remaining = Math.min(qModel.remaining, rq.remaining);
+                        }
+                    } catch (_) {}
+
+                    saveAccounts(accounts);
+                    if (qModel.remaining < estTokens) {
+                        accState.exhausted = true;
+                    }
+
+                    job.rawVideoUrl = `/files/raw/${encodeURIComponent(fileName)}`;
+                    job.cleanVideoUrl = `/files/clean/${encodeURIComponent(fileName)}`;
+                    job.status = 'done';
+                    job.statusText = `Hoàn tất (${acc.name} • -${(actualTokens/1000).toFixed(0)}k token • xoá logo ${delogoInfo.elapsed}s)`;
+                    addLog(`✨ Bài #${job.id} xong! Trừ ${actualTokens.toLocaleString()} token của ${acc.name} (còn ${qModel.remaining.toLocaleString()})`, 'success');
+                } catch (err) {
+                    accState.inFlightReservedTokens = Math.max(0, accState.inFlightReservedTokens - estTokens);
+                    const errStr = String(err.message || err.code || '');
+                    const isQuotaOrSessionError =
+                        err.code === 'QuotaExceeded.FreeTrialQuota' ||
+                        errStr.includes('QuotaExceeded') ||
+                        errStr.includes('quota') ||
+                        errStr.includes('balance') ||
+                        errStr.includes('Draft') ||
+                        errStr.includes('Session') ||
+                        errStr.includes('401') ||
+                        errStr.includes('403');
+
+                    job._retryCount = (job._retryCount || 0) + 1;
+
+                    if (isQuotaOrSessionError || job._retryCount <= accStates.length) {
+                        if (err.code === 'QuotaExceeded.FreeTrialQuota' || errStr.includes('QuotaExceeded')) {
+                            qModel.consumed = qModel.total || 2000000;
+                            qModel.remaining = 0;
+                            saveAccounts(accounts);
+                        }
+                        accState.exhausted = true;
+                        job.accountId = null;
+                        job.status = 'waiting';
+                        job.statusText = `🔄 Acc ${acc.name} hết/thiếu token -> Tự động chuyển sang Acc khác...`;
+                        addLog(`🔄 Bài #${job.id}: Acc ${acc.name} báo lỗi/hết token (${errStr}) -> Chuyển prompt sang Acc tiếp theo!`, 'warn');
+                    } else {
+                        job.status = 'error';
+                        job.statusText = `Lỗi: ${errStr}`;
+                    }
+                } finally {
+                    accState.activeWorkers = Math.max(0, accState.activeWorkers - 1);
+                    dispatchPendingJobs();
+                }
+            }
+
+            function dispatchPendingJobs() {
+                if (RUN_STATE.stopRequested) return;
+                const estTokens = estimateVideoTokens(options);
+
+                for (const job of newJobs) {
+                    if (job.status !== 'waiting') continue;
+
+                    // Tìm Acc còn đủ token cho ít nhất 1 video VÀ chưa vượt quá số luồng/Acc
+                    let chosenAccState = null;
+                    for (const st of accStates) {
+                        if (st.exhausted) continue;
+                        const unreservedTokens = st.qModel.remaining - st.inFlightReservedTokens;
+                        if (unreservedTokens < estTokens) {
+                            if (!st.notifiedInsufficient && st.activeWorkers === 0) {
+                                st.notifiedInsufficient = true;
+                                addLog(`⚠️ Acc ${st.acc.name} chỉ còn ${st.qModel.remaining.toLocaleString()} token (< ${estTokens.toLocaleString()}) -> Tự động chuyển prompt sang Acc khác`, 'warn');
+                            }
+                            continue;
+                        }
+                        if (st.activeWorkers < concurrency) {
+                            chosenAccState = st;
                             break;
                         }
-
-                        const currentIdx = queueIdx++;
-                        const job = newJobs[currentIdx];
-                        if (!job || job.status === 'done') continue;
-
-                        const estTokens = estimateVideoTokens(options);
-                        inFlightReservedTokens += estTokens;
-
-                        job.workerId = workerId;
-                        job.accountId = acc.name || acc.accountId;
-                        job.status = 'submitting';
-                        job.statusText = `Luồng ${workerId}: Đang gửi lệnh...`;
-
-                        try {
-                            const { messageItemId, taskId } = await submitVideoTask(acc.cookies, workerState, job, options, modelSpec);
-                            job.taskId = taskId;
-                            job.status = 'rendering';
-                            job.statusText = `Luồng ${workerId}: Đang tạo video...`;
-
-                            const startPoll = Date.now();
-                            let downloadUrl = null;
-                            while (!RUN_STATE.stopRequested) {
-                                await new Promise(r => setTimeout(r, 4000));
-                                const pollRes = await fetch(`${BFF_BASE}/api/2024-10-01/GetMessageItem`, {
-                                    method: 'POST',
-                                    headers: buildHeaders(acc.cookies, true),
-                                    body: JSON.stringify({ MessageItemId: messageItemId, ProjectName: 'default' })
-                                });
-                                const pollData = await pollRes.json();
-                                const result = pollData?.Result;
-                                if (!result) continue;
-
-                                const st = (result.Status || '').toLowerCase();
-                                job.elapsedSec = Math.round((Date.now() - startPoll) / 1000);
-                                job.statusText = `Luồng ${workerId}: Đang render (${job.elapsedSec}s)...`;
-
-                                if (st === 'success' || st === 'succeeded') {
-                                    const contentObj = JSON.parse(result.Content || '{}');
-                                    downloadUrl = contentObj.downloadUrl || contentObj.url;
-                                    break;
-                                } else if (st === 'failed' || st === 'error' || st === 'cancelled') {
-                                    throw new Error(`Render lỗi trên server`);
-                                }
-                            }
-
-                            if (RUN_STATE.stopRequested) {
-                                inFlightReservedTokens = Math.max(0, inFlightReservedTokens - estTokens);
-                                job.status = 'error';
-                                job.statusText = 'Đã dừng';
-                                break;
-                            }
-
-                            job.status = 'cleaning';
-                            job.statusText = `Luồng ${workerId}: Đang xoá logo...`;
-
-                            const fileName = `video_${String(job.id).padStart(3, '0')}_${taskId}.mp4`;
-                            const rawPath = path.join(DIRS.rawOut, fileName);
-                            const cleanPath = path.join(DIRS.cleanOut, fileName);
-
-                            const dlRes = await fetch(downloadUrl);
-                            if (!dlRes.ok) throw new Error(`Lỗi tải MP4`);
-                            fs.writeFileSync(rawPath, Buffer.from(await dlRes.arrayBuffer()));
-
-                            const delogoInfo = await removeLogoFFmpeg(rawPath, cleanPath, true);
-
-                            inFlightReservedTokens = Math.max(0, inFlightReservedTokens - estTokens);
-                            const actualTokens = estimateVideoTokens(options, delogoInfo.dims);
-                            qModel.consumed = Math.min(qModel.total, (qModel.consumed || 0) + actualTokens);
-                            qModel.remaining = Math.max(0, qModel.total - qModel.consumed);
-
-                            try {
-                                const remoteQ = await fetchAccountQuota(acc.cookies);
-                                const rq = remoteQ?.[modelSpec.modelName];
-                                if (rq) {
-                                    qModel.consumed = Math.max(qModel.consumed, rq.consumed);
-                                    qModel.remaining = Math.min(qModel.remaining, rq.remaining);
-                                }
-                            } catch (_) {}
-
-                            saveAccounts(accounts);
-                            if (qModel.remaining <= 0) accountExhausted = true;
-
-                            job.rawVideoUrl = `/files/raw/${encodeURIComponent(fileName)}`;
-                            job.cleanVideoUrl = `/files/clean/${encodeURIComponent(fileName)}`;
-                            job.status = 'done';
-                            job.statusText = `Hoàn tất (-${(actualTokens/1000).toFixed(0)}k token • xoá logo ${delogoInfo.elapsed}s)`;
-                            addLog(`✨ Bài #${job.id} xong! Trừ ${actualTokens.toLocaleString()} token của ${acc.name}`, 'success');
-                        } catch (err) {
-                            inFlightReservedTokens = Math.max(0, inFlightReservedTokens - estTokens);
-                            if (err.code === 'QuotaExceeded.FreeTrialQuota' || err.message.includes('QuotaExceeded')) {
-                                qModel.consumed = qModel.total || 2000000;
-                                qModel.remaining = 0;
-                                saveAccounts(accounts);
-                                accountExhausted = true;
-                                job.status = 'waiting';
-                                job.statusText = 'Chuyển sang Cookie tiếp theo...';
-                                queueIdx = Math.min(queueIdx, currentIdx);
-                                break;
-                            } else {
-                                job.status = 'error';
-                                job.statusText = `Lỗi: ${err.message}`;
-                                try { workerState = await createWorkerSession(acc.cookies, modelSpec.modelId); } catch (_) {}
-                            }
-                        }
                     }
-                }
 
-                const activeCount = Math.min(concurrency, newJobs.length - queueIdx);
-                const workers = [];
-                for (let w = 1; w <= activeCount; w++) workers.push(worker(w));
-                await Promise.all(workers);
+                    if (!chosenAccState) {
+                        // Kiểm tra xem có phải tất cả các Acc đều đã hết/không đủ token và không còn luồng nào đang chạy không
+                        const anyAccountHasEnoughTokens = accStates.some(
+                            st => !st.exhausted && (st.qModel.remaining - st.inFlightReservedTokens) >= estTokens
+                        );
+                        if (!anyAccountHasEnoughTokens && activePromises.size === 0) {
+                            job.status = 'error';
+                            job.statusText = `Tất cả Acc đã hết hoặc không đủ ${estTokens.toLocaleString()} token`;
+                        }
+                        continue;
+                    }
+
+                    // Khóa trước số token của video này ngay lập tức để các luồng sau biết chính xác số dư còn lại
+                    chosenAccState.inFlightReservedTokens += estTokens;
+                    chosenAccState.activeWorkers += 1;
+                    const workerSlot = chosenAccState.activeWorkers;
+                    job.status = 'submitting';
+                    job.accountId = chosenAccState.acc.name || chosenAccState.acc.accountId;
+
+                    const p = executeJobOnAccount(chosenAccState, job, workerSlot).finally(() => {
+                        activePromises.delete(p);
+                        dispatchPendingJobs();
+                    });
+                    activePromises.add(p);
+                }
+            }
+
+            dispatchPendingJobs();
+
+            while (activePromises.size > 0 && !RUN_STATE.stopRequested) {
+                await Promise.race(activePromises);
             }
 
             for (const j of newJobs) {
                 if (j.status === 'waiting') {
                     j.status = 'error';
-                    j.statusText = 'Hết Token trên tất cả Cookie';
+                    j.statusText = `Hết hoặc không đủ ${estTokensPerVid.toLocaleString()} token trên tất cả Cookie`;
                 }
             }
 
@@ -1591,7 +1651,7 @@ function renderAccounts() {
   for (const acc of currentAccounts) {
     const rem = acc.quotas?.[modelKey]?.remaining ?? 0;
     totalRem += rem;
-    if (rem > 0) totalVids += Math.max(1, Math.ceil(rem / costPerVid));
+    if (rem >= costPerVid) totalVids += Math.floor(rem / costPerVid);
   }
 
   document.getElementById('totalSummaryBadge').textContent =
@@ -1608,8 +1668,11 @@ function renderAccounts() {
     const rem = activeQ.remaining ?? 0;
     const total = activeQ.total || 2000000;
     const pct = Math.round((rem / total) * 100);
-    const hasToken = rem > 0;
-    const estVids = hasToken ? Math.max(1, Math.ceil(rem / costPerVid)) : 0;
+    const estVids = rem >= costPerVid ? Math.floor(rem / costPerVid) : 0;
+    const hasEnough = estVids > 0;
+    const badgeBg = hasEnough ? 'rgba(16,185,129,0.16)' : (rem > 0 ? 'rgba(245,158,11,0.18)' : 'rgba(239,68,68,0.16)');
+    const badgeColor = hasEnough ? '#34d399' : (rem > 0 ? '#fbbf24' : '#f87171');
+    const badgeText = hasEnough ? \`Còn ~\${estVids} video (\${pct}%)\` : (rem > 0 ? \`Thiếu token (0 video)\` : 'Hết Token');
 
     return \`
       <div class="acc-item">
@@ -1619,18 +1682,18 @@ function renderAccounts() {
             <span style="font-size:11px;color:var(--muted);"> (\${acc.accountId})</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;">
-            <span style="font-size:11px;font-weight:700;padding:2px 7px;border-radius:99px;background:\${hasToken?'rgba(16,185,129,0.16)':'rgba(239,68,68,0.16)'};color:\${hasToken?'#34d399':'#f87171'};">
-              \${hasToken ? \`Còn ~\${estVids} video (\${pct}%)\` : 'Hết Token'}
+            <span style="font-size:11px;font-weight:700;padding:2px 7px;border-radius:99px;background:\${badgeBg};color:\${badgeColor};">
+              \${badgeText}
             </span>
             <button class="btn" style="padding:1px 6px;font-size:11px;" onclick="deleteAccount('\${acc.id}')">✕</button>
           </div>
         </div>
         <div style="font-size:11.5px;color:var(--muted);display:flex;justify-content:space-between;">
           <span>Giới hạn \${modelKey}:</span>
-          <b style="color:\${hasToken?'var(--gold-light)':'#f87171'}">\${rem.toLocaleString()} / 2,000,000</b>
+          <b style="color:\${hasEnough?'var(--gold-light)':badgeColor}">\${rem.toLocaleString()} / 2,000,000</b>
         </div>
         <div class="quota-bar">
-          <div class="quota-fill" style="width:\${pct}%;background:\${hasToken?'#10b981':'#ef4444'}"></div>
+          <div class="quota-fill" style="width:\${pct}%;background:\${hasEnough?'#10b981':badgeColor}"></div>
         </div>
       </div>
     \`;
@@ -1710,11 +1773,12 @@ async function deleteAccount(id) {
 }
 
 async function removeExhausted() {
+  const costPerVid = getEstimatedTokensPerVideo();
   const modelKey = document.getElementById('modelSelect').value.includes('1-5-pro') ? 'seedance-1-5-pro'
     : document.getElementById('modelSelect').value.includes('fast') ? 'seedance-1-0-pro-fast' : 'seedance-1-0-pro';
   for (const acc of [...currentAccounts]) {
-    const rem = acc.quotas?.[modelKey]?.remaining ?? 1;
-    if (rem <= 0) {
+    const rem = acc.quotas?.[modelKey]?.remaining ?? 0;
+    if (rem < costPerVid) {
       await fetch('/api/accounts/' + encodeURIComponent(acc.id), { method: 'DELETE' });
     }
   }
