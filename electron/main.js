@@ -4,11 +4,6 @@ const fs = require('fs');
 const os = require('os');
 const http = require('http');
 
-// Chống lỗi màn hình đen trên các máy khách dùng card onboard cũ, laptop 2 card (Optimus) hoặc VPS/RDP
-app.disableHardwareAcceleration();
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-software-rasterizer');
-
 let mainWindow = null;
 const PORT = 3456;
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
@@ -134,7 +129,6 @@ function startEmbeddedBackend() {
   } catch (_) {}
 
   try {
-    // Chạy trực tiếp server_ui.js ngay bên trong tiến trình Electron (không cần spawn file .exe phụ nên không bao giờ bị Antivirus/Windows chặn)
     require(serverScript);
   } catch (err) {
     console.error('Backend start error:', err);
@@ -142,6 +136,12 @@ function startEmbeddedBackend() {
 }
 
 async function createWindow() {
+  // Khởi động Backend ngay lập tức trong cùng tiến trình Electron (chỉ mất ~5ms)
+  let alive = await checkServerAlive();
+  if (!alive) {
+    startEmbeddedBackend();
+  }
+
   mainWindow = new BrowserWindow({
     width: 1380,
     height: 840,
@@ -160,7 +160,7 @@ async function createWindow() {
 
   mainWindow.show();
   mainWindow.focus();
-  await mainWindow.loadFile(path.join(__dirname, 'splash.html'));
+  mainWindow.loadFile(path.join(__dirname, 'splash.html'));
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http:') || url.startsWith('https:')) {
@@ -179,18 +179,14 @@ async function createWindow() {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.loadURL(SERVER_URL);
         }
-      }, 700);
+      }, 600);
     }
   });
 
-  let alive = await checkServerAlive();
-  if (!alive) {
-    startEmbeddedBackend();
-    for (let i = 0; i < 80; i++) {
-      await new Promise((r) => setTimeout(r, 150));
-      alive = await checkServerAlive();
-      if (alive) break;
-    }
+  for (let i = 0; i < 80; i++) {
+    alive = await checkServerAlive();
+    if (alive) break;
+    await new Promise((r) => setTimeout(r, 120));
   }
 
   if (mainWindow && !mainWindow.isDestroyed()) {
