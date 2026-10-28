@@ -30,7 +30,7 @@ function resolvePaths() {
 
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR || '';
 
-  // Nếu chạy bản Portable.exe, lưu dữ liệu & code cập nhật ngay tại thư mục chứa file Portable.exe để không bị mất khi tắt app
+  // Nếu chạy bản Portable.exe, lưu dữ liệu & code cập nhật ngay tại thư mục chứa file Portable.exe
   if (portableDir && fs.existsSync(portableDir)) {
     for (const f of ['server_ui.js', 'github_update_config.json', 'tao_video_cookie_sll.js', 'xoa_logo_sll.js']) {
       const src = path.join(bundledBackend, f);
@@ -54,7 +54,19 @@ function resolvePaths() {
     };
   }
 
-  // Nếu chạy bản Setup.exe (NSIS cài vào AppData\Local\Programs\...) hoặc chạy Dev
+  // Nếu chạy từ win-unpacked bên trong thư mục dự án D:\see byteplus\electron\dist\win-unpacked
+  const parentProjectDir = path.resolve(process.execPath, '..', '..', '..', '..');
+  if (fs.existsSync(path.join(parentProjectDir, 'server_ui.js')) && fs.existsSync(path.join(parentProjectDir, 'cookies'))) {
+    return {
+      workDir: parentProjectDir,
+      serverScript: path.join(parentProjectDir, 'server_ui.js'),
+      ffmpegPath: fs.existsSync(path.join(parentProjectDir, 'bin', 'ffmpeg.exe'))
+        ? path.join(parentProjectDir, 'bin', 'ffmpeg.exe')
+        : path.join(bundledBackend, 'bin', 'ffmpeg.exe')
+    };
+  }
+
+  // Nếu chạy bản Setup.exe (NSIS cài vào AppData\Local\Programs\...)
   if (app.isPackaged && fs.existsSync(path.join(bundledBackend, 'server_ui.js'))) {
     return {
       workDir: bundledBackend,
@@ -94,10 +106,11 @@ function startNodeBackend() {
 
     serverProcess.on('exit', () => {
       serverProcess = null;
-      // Tự động khởi động lại backend ngay sau khi người dùng bấm "Cập nhật GitHub"
       if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
-        setTimeout(() => {
-          if (!isQuitting) startNodeBackend();
+        setTimeout(async () => {
+          if (!isQuitting && !(await checkServerAlive())) {
+            startNodeBackend();
+          }
         }, 500);
       }
     });
@@ -112,6 +125,7 @@ async function createWindow() {
     height: 840,
     minWidth: 1020,
     minHeight: 680,
+    show: true,
     backgroundColor: '#0b0c10',
     title: 'GenCPU.com × GenPixo.com — Seedance AI Video Studio',
     icon: path.join(__dirname, 'icon.ico'),
@@ -122,6 +136,8 @@ async function createWindow() {
     }
   });
 
+  mainWindow.show();
+  mainWindow.focus();
   mainWindow.loadFile(path.join(__dirname, 'splash.html'));
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -137,7 +153,7 @@ async function createWindow() {
   let alive = await checkServerAlive();
   if (!alive) {
     startNodeBackend();
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 250));
       alive = await checkServerAlive();
       if (alive) break;
@@ -146,34 +162,24 @@ async function createWindow() {
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(SERVER_URL);
+    mainWindow.show();
+    mainWindow.focus();
   }
 }
 
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
+app.whenReady().then(createWindow);
+
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
+app.on('window-all-closed', () => {
+  isQuitting = true;
+  if (serverProcess) {
+    try {
+      spawn('taskkill', ['/pid', String(serverProcess.pid), '/f', '/t'], { windowsHide: true });
+    } catch (_) {}
+    serverProcess = null;
+  }
   app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-  });
-
-  app.whenReady().then(createWindow);
-
-  app.on('before-quit', () => {
-    isQuitting = true;
-  });
-
-  app.on('window-all-closed', () => {
-    isQuitting = true;
-    if (serverProcess) {
-      try {
-        spawn('taskkill', ['/pid', String(serverProcess.pid), '/f', '/t'], { windowsHide: true });
-      } catch (_) {}
-      serverProcess = null;
-    }
-    app.quit();
-  });
-}
+});

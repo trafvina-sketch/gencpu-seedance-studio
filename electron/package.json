@@ -79,7 +79,8 @@
       "artifactName": "GenCPU_Seedance_Studio_Setup.exe"
     },
     "portable": {
-      "artifactName": "GenCPU_Seedance_Studio_Portable.exe"
+      "artifactName": "GenCPU_Seedance_Studio_Portable.exe",
+      "unpackDirName": "GenCPU_Seedance_Studio_Cache"
     }
   }
 }
