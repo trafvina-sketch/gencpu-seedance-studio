@@ -7,12 +7,29 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawn, spawnSync, exec } = require('child_process');
 
 const PORT = Number(process.env.SEEDANCE_PORT) || 3456;
-const ROOT_DIR = process.env.SEEDANCE_ROOT_DIR || __dirname;
+
+function resolveWritableRootDir() {
+    const preferred = process.env.SEEDANCE_ROOT_DIR || __dirname;
+    try {
+        if (!fs.existsSync(preferred)) fs.mkdirSync(preferred, { recursive: true });
+        const testFile = path.join(preferred, `.write_test_${process.pid}`);
+        fs.writeFileSync(testFile, 'ok');
+        fs.unlinkSync(testFile);
+        return preferred;
+    } catch (_) {
+        const fallback = path.join(process.env.LOCALAPPDATA || process.env.APPDATA || os.tmpdir(), 'GenCPU_Seedance_Studio_Data');
+        try { fs.mkdirSync(fallback, { recursive: true }); } catch (__) {}
+        return fallback;
+    }
+}
+
+const ROOT_DIR = resolveWritableRootDir();
 const BFF_BASE = 'https://arkbff-ap-southeast1.console.byteplus.com';
 const CONSOLE_BASE = 'https://console.byteplus.com';
 const WEB_ID_SECRET = 'ark-experience-tod-af9176#!';
@@ -27,44 +44,28 @@ const DIRS = {
 };
 
 for (const d of [DIRS.cookies, DIRS.uploads, DIRS.inputLogo, DIRS.rawOut, DIRS.cleanOut]) {
-    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+    try {
+        if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+    } catch (_) {}
 }
 
 // ==================== TIỆN ÍCH FFMPEG XOÁ LOGO (MỌI CẤU HÌNH MÁY) ====================
 function findBinary(name) {
-    const desktopDir = path.join(process.env.USERPROFILE || 'C:\\Users\\Admin', 'Desktop');
     const directCandidates = [
         process.env.SEEDANCE_FFMPEG_PATH || '',
         path.join(ROOT_DIR, 'bin', name),
         path.join(ROOT_DIR, name),
         path.join(__dirname, 'bin', name),
         path.join(__dirname, name),
-        path.join(desktopDir, 'Dự Án Riêng', 'capcut tho', 'ffmpeg-2025-12-24-git-abb1524138-full_build', 'bin', name)
+        process.resourcesPath ? path.join(process.resourcesPath, 'app-backend', 'bin', name) : '',
+        process.resourcesPath ? path.join(process.resourcesPath, 'bin', name) : ''
     ].filter(Boolean);
     for (const p of directCandidates) {
-        if (fs.existsSync(p)) return p;
-    }
-    try {
-        execFileSync(name, ['-version'], { stdio: 'ignore' });
-        return name;
-    } catch (_) {}
-
-    function walk(dir, depth = 0) {
-        if (depth > 3) return [];
-        let results = [];
         try {
-            const list = fs.readdirSync(dir, { withFileTypes: true });
-            for (const entry of list) {
-                if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-                const fullPath = path.join(dir, entry.name);
-                if (entry.isDirectory()) results = results.concat(walk(fullPath, depth + 1));
-                else if (entry.isFile() && entry.name.toLowerCase() === name.toLowerCase()) results.push(fullPath);
-            }
+            if (fs.existsSync(p)) return p;
         } catch (_) {}
-        return results;
     }
-    const found = walk(desktopDir);
-    return found.find(p => p.includes('full_build')) || found[0] || name;
+    return name;
 }
 
 const FFMPEG = findBinary('ffmpeg.exe');
@@ -90,7 +91,7 @@ function detectBestEncoder() {
                 '-frames:v', '1',
                 ...c.args,
                 '-f', 'null', '-'
-            ], { timeout: 4000 });
+            ], { timeout: 2500, windowsHide: true });
             if (r.status === 0) {
                 BEST_ENCODER = c;
                 break;
@@ -98,6 +99,9 @@ function detectBestEncoder() {
         } catch (_) {}
     }
     if (!BEST_ENCODER) BEST_ENCODER = candidates[candidates.length - 1];
+    if (typeof RUN_STATE !== 'undefined' && RUN_STATE) {
+        RUN_STATE.encoderName = BEST_ENCODER.name;
+    }
     return BEST_ENCODER;
 }
 
@@ -458,7 +462,7 @@ function loadInitialHistoryJobs() {
 let RUN_STATE = {
     isRunning: false,
     stopRequested: false,
-    encoderName: detectBestEncoder().name,
+    encoderName: 'Auto (GPU/CPU)',
     jobs: loadInitialHistoryJobs(),
     logs: []
 };
@@ -1117,8 +1121,12 @@ async function performGithubUpdate(payload = {}) {
         last_updated: nowStr
     });
 
-    // Tự động khởi động lại tiến trình sau 900ms để nạp code mới (Electron main.js sẽ tự động bật lại server_ui.js ngay lập tức)
+    // Tự động khởi động lại tiến trình sau 900ms để nạp code mới
     setTimeout(() => {
+        if (typeof global.__ELECTRON_RELAUNCH__ === 'function') {
+            global.__ELECTRON_RELAUNCH__();
+            return;
+        }
         if (!process.env.NO_AUTO_OPEN_BROWSER) {
             const child = spawn(process.execPath, [__filename], {
                 cwd: ROOT_DIR,
@@ -2301,8 +2309,8 @@ server.on('error', (err) => {
         console.log(`🌟 Công cụ đã đang chạy sẵn tại ${url}`);
         if (process.env.NO_AUTO_OPEN_BROWSER !== '1') {
             exec(`start "" "${url}"`);
+            setTimeout(() => process.exit(0), 1000);
         }
-        setTimeout(() => process.exit(0), 1000);
     } else {
         console.error('Lỗi khởi động Server:', err);
     }
@@ -2335,10 +2343,13 @@ if (process.argv.includes('--github-push')) {
         console.log('====================================================================');
         console.log(`🌟 SEEDANCE STUDIO (GENCPU.COM & GENPIXO.COM) ĐÃ MỞ TẠI: ${url}`);
         console.log('🌐 Website chính thức: https://gencpu.com  |  https://genpixo.com');
-        console.log(`⚡ Bộ xử lý xoá logo hiện tại: ${RUN_STATE.encoderName}`);
         console.log('====================================================================');
         if (process.env.NO_AUTO_OPEN_BROWSER !== '1') {
             exec(`start "" "${url}"`);
         }
+        // Nhận diện bộ mã hoá GPU/CPU ngầm sau khi Server đã mở để không làm trễ hay đen màn hình lúc khởi động
+        setTimeout(() => {
+            try { detectBestEncoder(); } catch (_) {}
+        }, 1200);
     });
 }

@@ -1,12 +1,15 @@
 const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const http = require('http');
-const { spawn } = require('child_process');
+
+// Chống lỗi màn hình đen trên các máy khách dùng card onboard cũ, laptop 2 card (Optimus) hoặc VPS/RDP
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
 
 let mainWindow = null;
-let serverProcess = null;
-let isQuitting = false;
 const PORT = 3456;
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
 
@@ -16,11 +19,38 @@ function checkServerAlive() {
       resolve(res.statusCode >= 200 && res.statusCode < 400);
     });
     req.on('error', () => resolve(false));
-    req.setTimeout(1500, () => {
+    req.setTimeout(1200, () => {
       req.destroy();
       resolve(false);
     });
   });
+}
+
+function isDirWritable(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
+    const testFile = path.join(dirPath, `.test_${process.pid}`);
+    fs.writeFileSync(testFile, '1');
+    fs.unlinkSync(testFile);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function syncBackendFiles(bundledBackend, targetDir) {
+  for (const f of ['server_ui.js', 'github_update_config.json', 'tao_video_cookie_sll.js', 'xoa_logo_sll.js']) {
+    const src = path.join(bundledBackend, f);
+    const dest = path.join(targetDir, f);
+    try {
+      if (!fs.existsSync(src)) continue;
+      if (path.resolve(src) === path.resolve(dest)) continue;
+      const shouldCopy = !fs.existsSync(dest) || (fs.statSync(src).mtimeMs > fs.statSync(dest).mtimeMs);
+      if (shouldCopy) {
+        fs.copyFileSync(src, dest);
+      }
+    } catch (_) {}
+  }
 }
 
 function resolvePaths() {
@@ -30,15 +60,25 @@ function resolvePaths() {
 
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR || '';
 
-  // Nếu chạy bản Portable.exe, lưu dữ liệu & code cập nhật ngay tại thư mục chứa file Portable.exe
-  if (portableDir && fs.existsSync(portableDir)) {
-    for (const f of ['server_ui.js', 'github_update_config.json', 'tao_video_cookie_sll.js', 'xoa_logo_sll.js']) {
-      const src = path.join(bundledBackend, f);
-      const dest = path.join(portableDir, f);
-      if (fs.existsSync(src) && !fs.existsSync(dest)) {
-        try { fs.copyFileSync(src, dest); } catch (_) {}
-      }
-    }
+  // 1. Nếu chạy từ win-unpacked bên trong thư mục dự án D:\see byteplus\electron\dist\win-unpacked
+  const parentProjectDir = path.resolve(process.execPath, '..', '..', '..', '..');
+  if (
+    fs.existsSync(path.join(parentProjectDir, 'server_ui.js')) &&
+    fs.existsSync(path.join(parentProjectDir, 'cookies')) &&
+    isDirWritable(parentProjectDir)
+  ) {
+    return {
+      workDir: parentProjectDir,
+      serverScript: path.join(parentProjectDir, 'server_ui.js'),
+      ffmpegPath: fs.existsSync(path.join(parentProjectDir, 'bin', 'ffmpeg.exe'))
+        ? path.join(parentProjectDir, 'bin', 'ffmpeg.exe')
+        : path.join(bundledBackend, 'bin', 'ffmpeg.exe')
+    };
+  }
+
+  // 2. Nếu chạy bản Portable.exe và thư mục chứa Portable.exe có quyền ghi
+  if (portableDir && isDirWritable(portableDir)) {
+    syncBackendFiles(bundledBackend, portableDir);
     const ffmpegCand = fs.existsSync(path.join(portableDir, 'bin', 'ffmpeg.exe'))
       ? path.join(portableDir, 'bin', 'ffmpeg.exe')
       : path.join(bundledBackend, 'bin', 'ffmpeg.exe');
@@ -54,20 +94,8 @@ function resolvePaths() {
     };
   }
 
-  // Nếu chạy từ win-unpacked bên trong thư mục dự án D:\see byteplus\electron\dist\win-unpacked
-  const parentProjectDir = path.resolve(process.execPath, '..', '..', '..', '..');
-  if (fs.existsSync(path.join(parentProjectDir, 'server_ui.js')) && fs.existsSync(path.join(parentProjectDir, 'cookies'))) {
-    return {
-      workDir: parentProjectDir,
-      serverScript: path.join(parentProjectDir, 'server_ui.js'),
-      ffmpegPath: fs.existsSync(path.join(parentProjectDir, 'bin', 'ffmpeg.exe'))
-        ? path.join(parentProjectDir, 'bin', 'ffmpeg.exe')
-        : path.join(bundledBackend, 'bin', 'ffmpeg.exe')
-    };
-  }
-
-  // Nếu chạy bản Setup.exe (NSIS cài vào AppData\Local\Programs\...)
-  if (app.isPackaged && fs.existsSync(path.join(bundledBackend, 'server_ui.js'))) {
+  // 3. Nếu chạy bản Setup.exe và bundledBackend có quyền ghi
+  if (app.isPackaged && fs.existsSync(path.join(bundledBackend, 'server_ui.js')) && isDirWritable(bundledBackend)) {
     return {
       workDir: bundledBackend,
       serverScript: path.join(bundledBackend, 'server_ui.js'),
@@ -75,47 +103,41 @@ function resolvePaths() {
     };
   }
 
-  const devRoot = path.resolve(__dirname, '..');
+  // 4. Fallback an toàn 100% cho mọi máy khách (kể cả khi khách mở trực tiếp trong WinRAR hoặc ổ C bị khóa quyền)
+  const safeUserDir = path.join(process.env.LOCALAPPDATA || process.env.APPDATA || os.tmpdir(), 'GenCPU_Seedance_Studio');
+  try { fs.mkdirSync(safeUserDir, { recursive: true }); } catch (_) {}
+  syncBackendFiles(bundledBackend, safeUserDir);
   return {
-    workDir: devRoot,
-    serverScript: path.join(devRoot, 'server_ui.js'),
-    ffmpegPath: path.join(devRoot, 'bin', 'ffmpeg.exe')
+    workDir: safeUserDir,
+    serverScript: fs.existsSync(path.join(safeUserDir, 'server_ui.js'))
+      ? path.join(safeUserDir, 'server_ui.js')
+      : path.join(bundledBackend, 'server_ui.js'),
+    ffmpegPath: path.join(bundledBackend, 'bin', 'ffmpeg.exe')
   };
 }
 
-function startNodeBackend() {
-  if (isQuitting) return;
+function startEmbeddedBackend() {
   const { workDir, serverScript, ffmpegPath } = resolvePaths();
 
-  const env = Object.assign({}, process.env, {
-    ELECTRON_RUN_AS_NODE: '1',
-    NO_AUTO_OPEN_BROWSER: '1',
-    SEEDANCE_PORT: String(PORT),
-    SEEDANCE_ROOT_DIR: workDir,
-    SEEDANCE_FFMPEG_PATH: ffmpegPath
-  });
+  process.env.NO_AUTO_OPEN_BROWSER = '1';
+  process.env.SEEDANCE_PORT = String(PORT);
+  process.env.SEEDANCE_ROOT_DIR = workDir;
+  process.env.SEEDANCE_FFMPEG_PATH = ffmpegPath;
+
+  global.__ELECTRON_RELAUNCH__ = () => {
+    app.relaunch();
+    app.exit(0);
+  };
 
   try {
-    serverProcess = spawn(process.execPath, [serverScript], {
-      cwd: workDir,
-      env,
-      stdio: 'ignore',
-      detached: false,
-      windowsHide: true
-    });
+    process.chdir(workDir);
+  } catch (_) {}
 
-    serverProcess.on('exit', () => {
-      serverProcess = null;
-      if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
-        setTimeout(async () => {
-          if (!isQuitting && !(await checkServerAlive())) {
-            startNodeBackend();
-          }
-        }, 500);
-      }
-    });
+  try {
+    // Chạy trực tiếp server_ui.js ngay bên trong tiến trình Electron (không cần spawn file .exe phụ nên không bao giờ bị Antivirus/Windows chặn)
+    require(serverScript);
   } catch (err) {
-    console.error('Failed to start backend:', err);
+    console.error('Backend start error:', err);
   }
 }
 
@@ -138,7 +160,7 @@ async function createWindow() {
 
   mainWindow.show();
   mainWindow.focus();
-  mainWindow.loadFile(path.join(__dirname, 'splash.html'));
+  await mainWindow.loadFile(path.join(__dirname, 'splash.html'));
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http:') || url.startsWith('https:')) {
@@ -150,11 +172,22 @@ async function createWindow() {
     return { action: 'allow' };
   });
 
+  // Nếu trang web bị lỗi kết nối tạm thời, tự động nạp lại thay vì hiện màn hình đen
+  mainWindow.webContents.on('did-fail-load', (_event, _errorCode, _errorDescription, validatedURL) => {
+    if (validatedURL && validatedURL.startsWith('http://127.0.0.1')) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.loadURL(SERVER_URL);
+        }
+      }, 700);
+    }
+  });
+
   let alive = await checkServerAlive();
   if (!alive) {
-    startNodeBackend();
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 250));
+    startEmbeddedBackend();
+    for (let i = 0; i < 80; i++) {
+      await new Promise((r) => setTimeout(r, 150));
       alive = await checkServerAlive();
       if (alive) break;
     }
@@ -169,17 +202,6 @@ async function createWindow() {
 
 app.whenReady().then(createWindow);
 
-app.on('before-quit', () => {
-  isQuitting = true;
-});
-
 app.on('window-all-closed', () => {
-  isQuitting = true;
-  if (serverProcess) {
-    try {
-      spawn('taskkill', ['/pid', String(serverProcess.pid), '/f', '/t'], { windowsHide: true });
-    } catch (_) {}
-    serverProcess = null;
-  }
   app.quit();
 });
